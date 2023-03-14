@@ -1,0 +1,72 @@
+---
+title: "Exercise 1"
+author: "Rohana Habib"
+output: pdf_document
+date: "2023-03-14"
+always_allow_html: true
+---
+
+```{r Load Libraries}
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(igraph)
+library(tidygraph)
+library(visNetwork)
+```
+
+```{r Load LinkedIn Connections CSV File}
+data = read_csv("C:/Users/rohan/OneDrive/Documents/ORGB 672/Connections.csv")
+```
+
+```{r Remove NA values from First Name, Last Name, and Company columns}
+data <- data %>%
+  filter(!is.na(`First Name`) & !is.na(`Last Name`) & !is.na(Company))
+```
+
+```{r Connections by Company}
+connections_by_employer <- data %>%
+  group_by(Company) %>%
+  summarize("Connection Count" = n())
+
+total_connection_count <- nrow(data)
+total_connection_count
+```
+
+```{r Only keep Connections that work for the same companies}
+data <- data[data$Company %in% data$Company[duplicated(data$Company)],]
+```
+
+```{r Nodes Dataframe}
+data$Name <- paste(data$`First Name`, substr(data$`Last Name`, 1, 1), sep = " ")
+
+nodes <- data %>%
+  mutate(id = Name, label = Name, title = Company) %>%
+  distinct(id, label, title)
+```
+
+```{r Edges Dataframe}
+edges <- data %>%
+  left_join(data, by = "Company") %>%
+  filter(Name.x != Name.y) %>%
+  mutate(from = Name.x,
+         to = Name.y,
+         id = paste(Name.x, Name.y, sep = "-"))
+```
+
+```{r Plot using igraph}
+plot_1 <- tbl_graph(nodes = nodes, edges = edges) %>%
+  as.igraph()
+plot(plot_1)
+```
+
+```{r Nicer Plot Using visNetwork}
+visNetwork(nodes, edges, width = "100%", height = "800px") %>%
+  visNodes(shape = "circle", font = list(size = 20, color = "black"),
+           shapeProperties = list(useBorderWithImage = FALSE, useImageSize = FALSE,
+                                  useLabelSize = FALSE, useBorder = FALSE)) %>%
+  visEdges(smooth = FALSE, width = 1, color = "gray") %>%
+  visOptions(highlightNearest = TRUE) %>%
+  visLegend(position = "right", useGroups = TRUE) %>%
+  visGroups(groupname = "Connection IDs", groups = unique(nodes$id))
+```
