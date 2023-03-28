@@ -1,0 +1,264 @@
+---
+title: "Exercise 3"
+author: "Rohana Habib"
+date: "2023-03-28"
+output: pdf_document
+---
+
+```{r Load Libraries}
+library(readr)
+library(arrow)
+library(gender)
+library(wru)
+library(ymd)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(igraph)
+```
+
+```{r Part 1}
+### 1. Load the files and add gender, race, and tenure for each examiner
+
+applications = read_parquet("C:/Users/rohan/Downloads/672_project_data/app_data_sample.parquet")
+edges = read_csv("C:/Users/rohan/Downloads/672_project_data/edges_sample.csv")
+
+## Gender
+
+# Getting examiner first names (unique only)
+examiner_names <- applications %>% distinct(examiner_name_first)
+
+# Predicting examiner gender based on first name
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(examiner_name_first = name, gender, proportion_female)
+
+# Joining examiner gender to the applications data
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+## Race
+
+# Getting examiner last names (unique only)
+examiner_surnames <- applications %>% select(surname = examiner_name_last) %>% distinct()
+
+# Predicting examiner race based on last name
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% as_tibble()
+
+# Selecting race with highest probability based on examiner last name
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+# Joining examiner race to the applications data
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+## Tenure
+
+# Extracting examiner ID and application date
+examiner_dates <- applications %>% 
+  select(examiner_id, filing_date, appl_status_date)
+
+# Converting dates to maintain consistent formatting
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+
+# Calculating earliest & latest dates by examiner and tenure
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+  ) %>% 
+  filter(year(latest_date)<2018)
+
+# Joining examiner tenure to the applications data
+applications <- applications %>% left_join(examiner_dates, by = "examiner_id")
+```
+
+``` {r Part 2}
+### 2. Pick two work groups to focus on 
+###(a work group is represented by the first 3 digits of `examiner_art_unit` value)
+
+## Work groups:
+workgroup_1 <- "160"
+workgroup_2 <- "161"
+
+## Summary Statistics & Plots
+
+workgroups <- applications %>%
+  filter(substr(examiner_art_unit, 1, 3) %in% c(workgroup_1, workgroup_2))
+
+# Gender
+gender <- workgroups %>%
+  group_by(workgroup = substr(examiner_art_unit, 1, 3), gender) %>%
+  summarise(count = n()) %>%
+  group_by(workgroup) %>%
+  mutate(total_count = sum(count),
+         percentage = count/total_count * 100) %>%
+  select(-total_count) %>%
+  arrange(workgroup, count, .by_group = TRUE)
+
+# Race
+race <- workgroups %>%
+  group_by(workgroup = substr(examiner_art_unit, 1, 3), race) %>%
+  summarise(count = n()) %>%
+  group_by(workgroup) %>%
+  mutate(total_count = sum(count),
+         percentage = count/total_count * 100) %>%
+  select(-total_count) %>%
+  arrange(workgroup, count, .by_group = TRUE)
+
+# Tenure by years
+tenure <- workgroups %>%
+  mutate(tenure_years = floor(tenure_days / 365)) %>%
+  group_by(workgroup = substr(examiner_art_unit, 1, 3), tenure_years) %>%
+  summarise(count = n()) %>%
+  group_by(workgroup) %>%
+  mutate(total_count = sum(count),
+         percentage = count/total_count * 100) %>%
+  select(-total_count) %>%
+  arrange(workgroup, tenure_years)
+
+# Summary Statistics
+print(gender)
+print(race)
+print(tenure, n=37)
+
+# Plots
+
+gender2 <- workgroups %>%
+  ggplot(aes(x = gender, fill = gender)) + geom_bar() +
+  facet_wrap(~substr(examiner_art_unit, 1, 3)) +
+  labs(title = "Gender Distribution",
+       x = "Gender",
+       y = "Count") +
+  theme_minimal()
+
+race2 <- workgroups %>%
+  ggplot(aes(x = race, fill = race)) + geom_bar() +
+  facet_wrap(~substr(examiner_art_unit, 1, 3)) +
+  labs(title = "Race Distribution",
+       x = "Race",
+       y = "Count") +
+  theme_minimal()
+
+tenure2 <- workgroups %>%
+  ggplot(aes(x = tenure_days)) + geom_histogram(binwidth = 30) +
+  facet_wrap(~substr(examiner_art_unit, 1, 3)) +
+  labs(title = "Tenure Distribution",
+       x = "Tenure (days)",
+       y = "Count") +
+  theme_minimal()
+
+print(gender2)
+print(race2)
+print(tenure2)
+```
+
+```{r Insights 1}
+# Work groups 160 and 161 are extremely different in terms of demographic features.
+
+# Work group 160 has a majority of male examiners at 69% compared to female ones at 28.4%.
+# In contrast, work group 160 has a more even split with 44% male to 41.5% female.
+# However, as a note, there are examiners who have not identified with either gender so this
+# may cause there to be slight shifts in actual gender distribution.
+
+# Work group 160 is made up of Black, Asian, and White examiners. 90% of examiners in this
+# work group are White, 7.74% are Asian, and 1.94% are Black. 
+# Similarly, work group 161 is made up of Hispanic, Black, Asian, and White examiners.
+# Where, 73.5% of examiners are White, 21.7% are Asian, 2.73% are Black, and 2.05% are Hispanic.
+# The similarities across both work groups based on race displays the significant disparities
+# between White individuals and people of color in the hiring process. Disproportions such as
+# these are also likely to reflect on other societal systems outside of employment such as education. 
+
+# Both work groups show a high level of tenure. The majority of examiners have around
+# 13 to 17 years of tenure. This may show that examiners enjoy their job and are being treated well.
+```
+
+``` {r Part 3}
+### 3. Create advice networks from `edges_sample`. Calculate centrality scores for chosen work groups
+
+# I will be calculating degree and betweenness centrality as these measures are good indicators 
+# of which examiners have a big influence on the flow of information as they are well connected.
+
+## Plot
+
+g <- graph_from_data_frame(edges[, c("ego_examiner_id", "alter_examiner_id")], directed = TRUE)
+applications$workgroup <- substr(applications$examiner_art_unit, 1, 3)
+
+workgroup2 <- applications %>% 
+  select(examiner_id, workgroup) %>% 
+  distinct()
+
+V(g)$workgroup <- workgroup2$workgroup[match(V(g)$name, workgroup2$examiner_id)]
+
+g2 <- g %>% 
+  induced_subgraph(V(g)[V(g)$workgroup %in% c(workgroup_1, workgroup_2)])
+
+par(mar = c(0, 0, 0, 0))
+set.seed(123)
+
+color1 <- "turquoise"
+color2 <- "magenta"
+
+vertex_colors <- ifelse(V(g2)$workgroup == workgroup_1, color1, color2)
+
+plot(g2,
+     vertex.color = vertex_colors,
+     vertex.label = NA,
+     vertex.size = 5,
+     edge.arrow.size = 0.5,
+     main = "Workgroups 160 and 161")
+
+legend("topright", 
+       legend = c("Workgroup 1", "Workgroup 2"), 
+       col = c(color1, color2), 
+       pch = 16)
+
+## Centralities
+
+degree_centrality <- degree(g2, mode = "all")
+betweenness_centrality <- betweenness(g2, directed = TRUE)
+
+V(g2)$degree_centrality <- degree_centrality
+V(g2)$betweenness_centrality <- betweenness_centrality
+
+centralities <- data.frame(
+  examiner_id = V(g2)$name,
+  workgroup = V(g2)$workgroup,
+  degree_centrality = V(g2)$degree_centrality,
+  betweenness_centrality = V(g2)$betweenness_centrality
+)
+
+centralities$examiner_id <- as.numeric(centralities$examiner_id)
+
+applications2 <- applications %>%
+  select(examiner_id, gender, race, tenure_days) %>%
+  inner_join(centralities, by = "examiner_id") %>%
+  distinct(examiner_id, .keep_all = TRUE)
+
+print(applications2)
+```
+
+``` {r Insights 2}
+# When filtering top 5 examiners based on highest degree centrality, all examiners
+# came from group 161 which makes sense as this group was quite large in comparison
+# to 160. Of the top 5, 4/5 were White. Although gender was more or less equal for this
+# group but leaning slightly towards more male individuals, 3/5 of the top examiners by
+# degree centrality were female. One interesting insight is that degree and betweenness
+# centrality does not seem to correlate well with tenure. This may be due to the fact that
+# although individuals have tenure, it may come down to their personality and ability to
+# make connections on a daily basis.
+```
