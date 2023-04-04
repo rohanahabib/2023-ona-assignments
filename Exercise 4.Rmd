@@ -1,0 +1,209 @@
+---
+title: "Exercise 4"
+author: "Rohana Habib"
+date: "2023-04-02"
+output: pdf_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(here)
+library(arrow)
+library(gender)
+library(wru)
+library(lubridate)
+
+library(tidyverse)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(gridExtra)
+```
+
+```{r load-data}
+applications = read_parquet("C:/Users/rohan/Downloads/672_project_data/app_data_sample.parquet")
+edges = read_csv("C:/Users/rohan/Downloads/672_project_data/edges_sample.csv")
+```
+
+```{r gender-1}
+
+## Gender
+
+# Getting examiner first names (unique only)
+examiner_names <- applications %>% distinct(examiner_name_first)
+```
+
+```{r gender-2}
+# Predicting examiner gender based on first name
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(examiner_name_first = name, gender, proportion_female)
+```
+
+```{r gender-3}
+# Remove extra columns from the gender table
+examiner_names_gender <- examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# Joining examiner gender to the applications data
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# Cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+
+```
+
+```{r race-1}
+## Race
+
+# Getting examiner last names (unique only)
+examiner_surnames <- applications %>% select(surname = examiner_name_last) %>% distinct()
+```
+
+```{r race-2}
+# Predicting examiner race based on last name
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% as_tibble()
+```
+
+```{r race-3}
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+```
+
+```{r race-4}
+# removing extra columns
+examiner_race <- examiner_race %>% 
+  select(surname,race)
+
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+```
+
+```{r tenure-1}
+## Tenure
+
+# Extracting examiner ID and application date
+examiner_dates <- applications %>% 
+  select(examiner_id, filing_date, appl_status_date) 
+```
+
+```{r tenure-2}
+# Converting dates to maintain consistent formatting
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+```
+
+```{r tenure-3}
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+    ) %>% 
+  filter(year(latest_date)<2018)%>%
+  mutate(tenure_years = tenure_days / 365) %>%
+    mutate(tenure = case_when(
+      tenure_years <= 1 ~ '<1',
+      tenure_years <= 2 ~ '1-2',
+      tenure_years <= 5 ~ '3-5',
+      tenure_years <= 9 ~ '6-9',
+      tenure_years <= 14 ~ '10-14',
+      tenure_years <= 100 ~ '15+',
+      TRUE ~ NA_character_
+    ))
+```
+
+```{r tenure-4}
+applications <- applications %>% 
+  left_join(examiner_dates, by = "examiner_id")
+
+#dropping NA values in app data
+applications <- applications %>%
+  drop_na(gender, race, tenure_days)
+
+rm(examiner_dates)
+gc()
+```
+
+```{r app_proc_time calculation}
+# Creating variable for application processing time that measures the number of days
+# from application filing date until the final decision
+
+proc_app <- applications %>% 
+  filter(applications$disposal_type != 'PEND')
+
+proc_app$proc_time <- ifelse(is.na(proc_app$abandon_date), difftime(proc_app$patent_issue_date,
+                                                            proc_app$filing_date, unit="days"),
+                            difftime(proc_app$abandon_date, proc_app$filing_date, unit="days"))
+
+# Drop negative processing time
+proc_app <- proc_app %>%
+  filter(proc_app$proc_time > 0)
+```
+
+```{r Create Network}
+# Creating the network
+
+edg <- edges %>% 
+  drop_na() %>% 
+  select(to = ego_examiner_id, from = alter_examiner_id)
+
+network <- graph_from_data_frame(edg, directed = TRUE) %>%
+  as_tbl_graph() 
+```
+
+```{r Network Metrics}
+
+network <- network %>%
+  mutate(degree = centrality_degree())
+
+network_data <- network %>% as.data.frame() %>% as_tibble() %>% rename(examiner_id = name)
+
+proc_app$examiner_id <- as.character(proc_app$examiner_id)
+proc_app <- proc_app %>% left_join(network_data, by = 'examiner_id')
+```
+
+```{r linear regression}
+# Drop NAs in degree
+sum(is.na(proc_app$degree)) # 623692 NAs
+
+proc_app <- proc_app %>% 
+  filter(!is.na(proc_app$degree))
+
+attach(proc_app)
+fit1 <- lm(proc_time~degree)
+summary(fit1)
+```
+
+```{r linear regression interaction}
+# Drop NAs in degree
+sum(is.na(proc_app$degree)) # 623692 NAs
+
+proc_app <- proc_app %>% 
+  filter(!is.na(proc_app$degree))
+
+attach(proc_app)
+fit2 <- lm(proc_time~degree * gender, data=proc_app)
+summary(fit2)
+```
+As we can see from the first output there is a statistically significant positive relationship between centrality and application processing time. Specifically, the coefficient of 0.7729 for the degree variable suggests that for every one unit increase in degree, the expected value of application processing time increases by 0.7729. This means that the more central an examiner is in the network, the longer it takes for them to go over an application. This could be due to the fact that maybe more complex or important applications are sent to central examiners. However, the adjusted R-squared value of this model is very small, indicating that the degree variable alone is likely not sufficient in explaining most of the variation in application processing time, and that other factors should be considered.
+
+The second output extends the analysis from the first output by examining whether the relationship between centrality and application processing time differs by gender.We can see that this is true as Degree:gendermale has a statistically significant negative coefficient (-0.65113) with a p-value of < 2.2e-16, suggesting that the effect of centrality on application processing time is moderated by gender. Specifically, the positive relationship between centrality and application processing time is weaker for male examiners.
